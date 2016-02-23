@@ -7,7 +7,6 @@ Contact: emily.mallory@stanford.edu
 
 Extractor for gene-gene relations, compiled
 in a single script
- 
 """
 
 import sys
@@ -17,7 +16,7 @@ import re
 import random
 
 #extractor dictionaries
-dict_gene_symbols_all = {} 
+dict_gene_symbols_all = {}
 dict_gene_pruned = {}
 dict_interact = {}
 dict_no_interact = {}
@@ -493,15 +492,6 @@ def extract(doc):
                     word2_tmp = re.sub("_", "", w2.word)
                     if w1.word == w2.word or word1_tmp == word2_tmp:
                         continue
-
-                    ## Don't include same genes as mentions ##
-                    if w1.word in dict_name2geneid and w2.word in dict_name2geneid:
-                        geneids1 = dict_name2geneid[w1.word]
-                        geneids2 = dict_name2geneid[w2.word]
-
-                        for geneid1 in geneids1:
-                            if geneid1 in geneids2:
-                                continue
 
                     ############## FEATURE EXTRACTION ####################################
                     
