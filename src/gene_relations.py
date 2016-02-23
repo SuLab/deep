@@ -448,14 +448,29 @@ def extract(doc):
             if len(sent.words) <= MAX_WORDS_IN_SENTENCE:
                 yield sentence
 
-    for sent in get_short_sentences(doc):
+    def get_genes(sentence):
+        EXCLUDED_GENES = set([
+            "ECM", "EMT", "AML", "CLL", "ALL", "spatial", "PDF", "ANOVA", "MED",
+            "gamma", "San", "RSS", "2F1", "ROS", "zeta", "ADP", "ALS", "GEF", "GAP"
+        ])
+
         genes = []
+        for word in sentence.words:
+            if word.word in dict_gene_symbols_all and word.word not in EXCLUDED_GENES:
+                genes.append(word)
+
+        return genes
+
+#-------------------------------------------------------------------------------
+
+    for sent in get_short_sentences(doc):
+
+        genes = get_genes(sent)
+
         lemma = []
         deptree = {}
 
         for word in sent.words:
-            if word.word in dict_gene_symbols_all:
-                genes.append(word)
             deptree[word.insent_id] = {"label":word.dep_label, "parent":word.dep_par}
             lemma.append(word.lemma)
 
@@ -463,13 +478,8 @@ def extract(doc):
 
         for w1 in genes:
             for w2 in genes:
-                
-                #list of ambiguous gene symbols to exclude from detected genes
-                gene_exclusion = ["ECM", "EMT", "AML", "CLL", "ALL", "spatial", "PDF", "ANOVA", "MED", "gamma", "San", "RSS", "2F1", "ROS", "zeta", "ADP", "ALS", "GEF", "GAP"]
-
                 if w1 == w2: continue
                 if w1.word == w2.word: continue
-                if w1.word in gene_exclusion or w2.word in gene_exclusion: continue
 
                 minindex = min(w1.insent_id, w2.insent_id)
                 maxindex = max(w1.insent_id, w2.insent_id)
