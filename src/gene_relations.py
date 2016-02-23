@@ -8,6 +8,7 @@ Contact: emily.mallory@stanford.edu
 Extractor for gene-gene relations, compiled
 in a single script
 """
+from itertools import combinations
 
 import sys
 from helper.easierlife import *
@@ -454,6 +455,7 @@ def extract(doc):
             "gamma", "San", "RSS", "2F1", "ROS", "zeta", "ADP", "ALS", "GEF", "GAP"
         ])
 
+        # could probably make this a set of unique word.words, but need to verify
         genes = []
         for word in sentence.words:
             if word.word in dict_gene_symbols_all and word.word not in EXCLUDED_GENES:
@@ -461,12 +463,17 @@ def extract(doc):
 
         return genes
 
+    def get_gene_pairs(genes):
+        def remove_underscores(s):
+            return s.replace("_", "")
+
+        for geneA, geneB in combinations(genes, 2):
+            if remove_underscores(geneA) != remove_underscores(geneB):
+                yield (geneA, geneB)
+
 #-------------------------------------------------------------------------------
 
     for sent in get_short_sentences(doc):
-
-        genes = get_genes(sent)
-
         lemma = []
         deptree = {}
 
@@ -474,439 +481,420 @@ def extract(doc):
             deptree[word.insent_id] = {"label":word.dep_label, "parent":word.dep_par}
             lemma.append(word.lemma)
 
-        seen_pair_index = {}
+        genes = get_genes(sent)
+        for w1, w2 in get_gene_pairs(genes):
+            minindex = min(w1.insent_id, w2.insent_id)
+            maxindex = max(w1.insent_id, w2.insent_id)
 
-        for w1 in genes:
-            for w2 in genes:
-                if w1 == w2: continue
-                if w1.word == w2.word: continue
+            features = []
 
-                minindex = min(w1.insent_id, w2.insent_id)
-                maxindex = max(w1.insent_id, w2.insent_id)
+            ############## FEATURE EXTRACTION ####################################
 
-                #don't store pairs twice
-                if minindex in seen_pair_index:
-                    if maxindex in seen_pair_index[minindex]:
-                        continue
+            # ##### FEATURE: WORD SEQUENCE BETWEEN MENTIONS AND VERB PATHS #####
+            ws = []
+            verbs_between = []
+            minl_w1 = 100
+            minp_w1 = None
+            minw_w1 = None
+            mini_w1 = None
+            minl_w2 = 100
+            minp_w2 = None
+            minw_w2 = None
+            mini_w2 = None
+            neg_found = 0
+
+            high_quality_verb = 0
+            for i in range(minindex+1, maxindex):
+                if "," not in sent.words[i].lemma:
+                    ws.append(sent.words[i].lemma)
+                if re.search('VB\w*', sent.words[i].pos): # and sent.words[i].lemma != "be":
+                    if sent.words[i].word != "{" and sent.words[i].word != "}" and "," not in sent.words[i].word:
+                        p_w1 = sent.get_word_dep_path(minindex, sent.words[i].insent_id)
+                        p_w2 = sent.get_word_dep_path(sent.words[i].insent_id, maxindex)
+
+                        if len(p_w1) < minl_w1:
+                            minl_w1 = len(p_w1)
+                            minp_w1 = p_w1
+                            minw_w1 = sent.words[i].lemma
+                            mini_w1 = sent.words[i].insent_id
+
+                        if len(p_w2) < minl_w2:
+                            minl_w2 = len(p_w2)
+                            minp_w2 = p_w2
+                            minw_w2 = sent.words[i].lemma
+                            mini_w2 = sent.words[i].insent_id
+
+                        if i > 0:
+                            if sent.words[i-1].lemma in ["no", "not", "neither", "nor"]:
+                                if i < maxindex - 2:
+                                    neg_found = 1
+                                    features.append("NEG_VERB_BETWEEN_with[%s]" % sent.words[i-1].word + "-" + sent.words[i].lemma)
+                            else:
+                                if sent.words[i] != "{" and sent.words[i] != "}":
+                                    verbs_between.append(sent.words[i].lemma)
+
+            ## Do not include as candidates ##
+            if "while" in ws or "whereas" in ws or "but" in ws or "where" in ws or "however" in ws:
+                continue
+
+            ##### FEATURE: HIGH QUALITY PREP INTERACTION PATTERNS #####
+            high_quality_verb = 0
+            if len(verbs_between) == 1 and neg_found == 0:
+                features.append("SINGLE_VERB_BETWEEN_with[%s]" % verbs_between[0])
+                if verbs_between[0] in ["interact", "associate", "bind", "regulate", "phosporylate", "phosphorylated"]:
+                    high_quality_verb = 1
+            else:
+                for verb in verbs_between:
+                    features.append("VERB_BETWEEN_with[%s]" % verb)
+
+            if len(ws) == 1 and ws[0] == "and" and minindex > 1:
+                if minindex > 2:
+                    if sent.words[minindex - 3].lemma not in ["no", "not", "neither", "nor"] and \
+                    sent.words[minindex - 1].lemma in ["of", "between"] and sent.words[minindex - 2].word in ["interaction", "binding"]:
+                        high_quality_verb = 1
+                elif sent.words[minindex - 1].lemma in ["of", "between"] and sent.words[minindex - 2].word in ["interaction", "binding"]:
+                    high_quality_verb = 1
+
+            if len(ws) == 1 and ws[0] == "-" and maxindex < len(sent.words) - 1:
+                if sent.words[maxindex + 1].lemma == "complex":
+                    high_quality_verb = 1
+
+            if len(ws) == 1 and ws[0] == "and" and maxindex < len(sent.words) - 1:
+                if sent.words[maxindex + 1].word in ["interaction", "interactions"]:
+                    high_quality_verb = 1
+
+
+
+            ##### FEATURE: WORDS BETWEEN MENTIONS #####
+            if len(ws) < 7 and len(ws) > 0 and "{" not in ws and "}" not in ws and "\"" not in ws and "/" not in ws and "\\" not in ws and "," not in ws:
+                 if " ".join(ws) not in ["_ and _", "and", "or",  "_ or _"]:
+                     features.append("WORDS_BETWEEN_with[%s]" % " ".join(ws))
+
+
+            ##### FEATURE: 3-GRAM WORD SEQUENCE #####
+            bad_char = ["\'", "}", "{", "\"", "-", ",", "[", "]"] #think about adding parens
+            if len(ws) > 4 and len(ws) < 15:
+                for i in range(2,len(ws)):
+                    if ws[i-2] not in bad_char and ws[i - 1] not in bad_char and ws[i] not in bad_char:
+                        if "," not in ws[i-2] and "," not in ws[i-1] and "," not in ws:
+                            features.append("WS_3_GRAM_with[" + ws[i - 2] + "-" + ws[i - 1] + "-" + ws[i]+"]")
+
+            ##### FEATURE: PREPOSITIONAL PATTERNS #####
+            if minindex > 1:
+                if sent.words[minindex - 2].lemma.lower() in ["association", "interaction", "complex", "activation", "bind", "binding"]:
+                    if sent.words[minindex - 1].word.lower() in ["of", "between"] and ("with" in ws or "and" in ws or "to" in ws) and len(ws) ==1:
+                        features.append("PREP_PATTERN[{0}_{1}_{2}]".format(sent.words[minindex-2].lemma.lower(), sent.words[minindex-1].word.lower(), sent.words[minindex+1].word.lower()))
+                        high_quality_verb = 1
+
+
+            ##### FEATURE: NEGATED GENES #####
+            if sent.words[maxindex-1].lemma in ["no", "not", "neither", "nor"]:
+                features.append("NEG_SECOND_GENE[%s]" % sent.words[maxindex - 1].lemma)
+
+            if minindex > 0:
+                if sent.words[minindex-1].lemma in ["no", "not", "neither", "nor"]:
+                    features.append("NEG_FIRST_GENE[%s]" % sent.words[minindex - 1].lemma)
+
+
+            if mini_w2 == mini_w1 and mini_w1 != None and len(minp_w1) < 100: # and "," not in minw_w1:
+                feature2 = 'DEP_PAR_VERB_CONNECT_with[' + minw_w1 + ']'  
+                features.append(feature2)
+
+            ##### FEATURE: DEPENDENCY PATH #####
+            p = dep_path(deptree, sent, lemma, w1.insent_id, w1.insent_id+1,w2.insent_id,w2.insent_id+1)
+            word1_parent_idx = w1.dep_par
+            word1_parent_path = w1.dep_label
+
+            if len(p) < 100:
+                try:
+                    word1_parent_path = normalize_utf(word1_parent_path)
+                    p = normalize_utf(p)
+                    p.decode('ascii')
+                    norm_p = re.sub(",", "_", normalize(p))
+
+                    if word1_parent_idx == -1:
+                        features.append("ROOT_'" + norm_p + "'")
+
                     else:
-                        seen_pair_index[minindex][maxindex] = 1
-                else:
-                    seen_pair_index[minindex] = {}
-                    seen_pair_index[minindex][maxindex] = 1
+                        par_word = sent.words[word1_parent_idx]
+                        par_word_lemma = normalize_utf(par_word.lemma)
 
+                        if "," not in par_word_lemma:
+                            feature = 'DEP_PAR[' + normalize(par_word_lemma) + '--' + word1_parent_path + '--' + norm_p + ']'
+                            features.append(feature)
+                except UnicodeDecodeError:
+                    pass
 
-                features = []
+            ##### FEATURE: WINDOW FEATURES #####
+            bad_char = ["\'", "}", "{", "\"", "-", ",", "[", "]"] 
+            flag_family = 0
 
-                if w1 == w2:
-                    features.append('SAMEOBJ')
+            if minindex > 0:
+                if sent.words[minindex - 1].lemma not in bad_char and "," not in sent.words[minindex - 1].lemma:
+                    if sent.words[minindex-1].lemma in dict_gene_pruned:
+                        features.append('WINDOW_LEFT_M1_1_with[GENE]')
+                    else:
+                        features.append('WINDOW_LEFT_M1_1_with[%s]' % sent.words[minindex-1].lemma)
 
-                ## Don't include same genes as mentions ##
-                word1_tmp = re.sub("_", "", w1.word)
-                word2_tmp = re.sub("_", "", w2.word)
-                if w1.word == w2.word or word1_tmp == word2_tmp:
-                    continue
-
-                ############## FEATURE EXTRACTION ####################################
+            if minindex > 1:
                 
-                # ##### FEATURE: WORD SEQUENCE BETWEEN MENTIONS AND VERB PATHS #####
-                ws = []
-                verbs_between = []
-                minl_w1 = 100
-                minp_w1 = None
-                minw_w1 = None
-                mini_w1 = None
-                minl_w2 = 100
-                minp_w2 = None
-                minw_w2 = None
-                mini_w2 = None
-                neg_found = 0
-
-                high_quality_verb = 0
-                for i in range(minindex+1, maxindex):
-                    if "," not in sent.words[i].lemma:
-                        ws.append(sent.words[i].lemma)
-                    if re.search('VB\w*', sent.words[i].pos): # and sent.words[i].lemma != "be":
-                        if sent.words[i].word != "{" and sent.words[i].word != "}" and "," not in sent.words[i].word:
-                            p_w1 = sent.get_word_dep_path(minindex, sent.words[i].insent_id)
-                            p_w2 = sent.get_word_dep_path(sent.words[i].insent_id, maxindex)
-
-                            if len(p_w1) < minl_w1:
-                                minl_w1 = len(p_w1)
-                                minp_w1 = p_w1
-                                minw_w1 = sent.words[i].lemma
-                                mini_w1 = sent.words[i].insent_id
-
-                            if len(p_w2) < minl_w2:
-                                minl_w2 = len(p_w2)
-                                minp_w2 = p_w2
-                                minw_w2 = sent.words[i].lemma
-                                mini_w2 = sent.words[i].insent_id
-                            
-                            if i > 0:
-                                if sent.words[i-1].lemma in ["no", "not", "neither", "nor"]:
-                                    if i < maxindex - 2:
-                                        neg_found = 1
-                                        features.append("NEG_VERB_BETWEEN_with[%s]" % sent.words[i-1].word + "-" + sent.words[i].lemma)
-                                else:
-                                    if sent.words[i] != "{" and sent.words[i] != "}":
-                                        verbs_between.append(sent.words[i].lemma)
-
-                ## Do not include as candidates ##
-                if "while" in ws or "whereas" in ws or "but" in ws or "where" in ws or "however" in ws:
-                    continue
-
-                ##### FEATURE: HIGH QUALITY PREP INTERACTION PATTERNS #####
-                high_quality_verb = 0
-                if len(verbs_between) == 1 and neg_found == 0:
-                    features.append("SINGLE_VERB_BETWEEN_with[%s]" % verbs_between[0])
-                    if verbs_between[0] in ["interact", "associate", "bind", "regulate", "phosporylate", "phosphorylated"]:
-                        high_quality_verb = 1
+                if sent.words[minindex-2].word in dict_gene_pruned:
+                    left_phrase = "GENE"+"-"+sent.words[minindex-1].lemma
                 else:
-                    for verb in verbs_between:
-                        features.append("VERB_BETWEEN_with[%s]" % verb)
-
-                if len(ws) == 1 and ws[0] == "and" and minindex > 1:
-                    if minindex > 2:
-                        if sent.words[minindex - 3].lemma not in ["no", "not", "neither", "nor"] and \
-                        sent.words[minindex - 1].lemma in ["of", "between"] and sent.words[minindex - 2].word in ["interaction", "binding"]:
-                            high_quality_verb = 1
-                    elif sent.words[minindex - 1].lemma in ["of", "between"] and sent.words[minindex - 2].word in ["interaction", "binding"]:
-                        high_quality_verb = 1
-
-                if len(ws) == 1 and ws[0] == "-" and maxindex < len(sent.words) - 1:
-                    if sent.words[maxindex + 1].lemma == "complex":
-                        high_quality_verb = 1
-
-                if len(ws) == 1 and ws[0] == "and" and maxindex < len(sent.words) - 1:
-                    if sent.words[maxindex + 1].word in ["interaction", "interactions"]:
-                        high_quality_verb = 1
+                    left_phrase = sent.words[minindex-2].lemma+"-"+sent.words[minindex-1].lemma
                 
-
-                ##### FEATURE: WORDS BETWEEN MENTIONS #####
-                if len(ws) < 7 and len(ws) > 0 and "{" not in ws and "}" not in ws and "\"" not in ws and "/" not in ws and "\\" not in ws and "," not in ws:
-                     if " ".join(ws) not in ["_ and _", "and", "or",  "_ or _"]:
-                         features.append("WORDS_BETWEEN_with[%s]" % " ".join(ws))
-
-                ##### FEATURE: 3-GRAM WORD SEQUENCE #####
-                bad_char = ["\'", "}", "{", "\"", "-", ",", "[", "]"] #think about adding parens
-                if len(ws) > 4 and len(ws) < 15:
-                    for i in range(2,len(ws)):
-                        if ws[i-2] not in bad_char and ws[i - 1] not in bad_char and ws[i] not in bad_char:
-                            if "," not in ws[i-2] and "," not in ws[i-1] and "," not in ws:
-                                features.append("WS_3_GRAM_with[" + ws[i - 2] + "-" + ws[i - 1] + "-" + ws[i]+"]")
-
-                ##### FEATURE: PREPOSITIONAL PATTERNS #####
-                if minindex > 1:
-                    if sent.words[minindex - 2].lemma.lower() in ["association", "interaction", "complex", "activation", "bind", "binding"]:
-                        if sent.words[minindex - 1].word.lower() in ["of", "between"] and ("with" in ws or "and" in ws or "to" in ws) and len(ws) ==1:
-                            features.append("PREP_PATTERN[{0}_{1}_{2}]".format(sent.words[minindex-2].lemma.lower(), sent.words[minindex-1].word.lower(), sent.words[minindex+1].word.lower()))
-                            high_quality_verb = 1
-
-
-                ##### FEATURE: NEGATED GENES #####
-                if sent.words[maxindex-1].lemma in ["no", "not", "neither", "nor"]:
-                    features.append("NEG_SECOND_GENE[%s]" % sent.words[maxindex - 1].lemma)
-
-                if minindex > 0:
-                    if sent.words[minindex-1].lemma in ["no", "not", "neither", "nor"]:
-                        features.append("NEG_FIRST_GENE[%s]" % sent.words[minindex - 1].lemma)
-
-
-                if mini_w2 == mini_w1 and mini_w1 != None and len(minp_w1) < 100: # and "," not in minw_w1:
-                    feature2 = 'DEP_PAR_VERB_CONNECT_with[' + minw_w1 + ']'  
-                    features.append(feature2)
-
-                ##### FEATURE: DEPENDENCY PATH #####
-                p = dep_path(deptree, sent, lemma, w1.insent_id, w1.insent_id+1,w2.insent_id,w2.insent_id+1)
-                word1_parent_idx = w1.dep_par
-                word1_parent_path = w1.dep_label
-
-                if len(p) < 100:
-                    try:
-                        word1_parent_path = normalize_utf(word1_parent_path)
-                        p = normalize_utf(p)
-                        p.decode('ascii')
-                        norm_p = re.sub(",", "_", normalize(p))
-
-                        if word1_parent_idx == -1:
-                            features.append("ROOT_'" + norm_p + "'")
-
-                        else:
-                            par_word = sent.words[word1_parent_idx]
-                            par_word_lemma = normalize_utf(par_word.lemma)
-
-                            if "," not in par_word_lemma:
-                                feature = 'DEP_PAR[' + normalize(par_word_lemma) + '--' + word1_parent_path + '--' + norm_p + ']'
-                                features.append(feature)
-                    except UnicodeDecodeError:
-                        pass
-
-                ##### FEATURE: WINDOW FEATURES #####
-                bad_char = ["\'", "}", "{", "\"", "-", ",", "[", "]"] 
-                flag_family = 0
-
-                if minindex > 0:
-                    if sent.words[minindex - 1].lemma not in bad_char and "," not in sent.words[minindex - 1].lemma:
-                        if sent.words[minindex-1].lemma in dict_gene_pruned:
-                            features.append('WINDOW_LEFT_M1_1_with[GENE]')
-                        else:
-                            features.append('WINDOW_LEFT_M1_1_with[%s]' % sent.words[minindex-1].lemma)
-
-                if minindex > 1:
+                if sent.words[minindex - 2].lemma not in bad_char and sent.words[minindex - 1].lemma not in bad_char and "," not in left_phrase:
+                    features.append('WINDOW_LEFT_M1_PHRASE_with[%s]' % left_phrase)
                     
+                elif sent.words[minindex - 2].lemma not in bad_char and "," not in sent.words[minindex - 2].lemma:
                     if sent.words[minindex-2].word in dict_gene_pruned:
-                        left_phrase = "GENE"+"-"+sent.words[minindex-1].lemma
+                        features.append('WINDOW_LEFT_M1_2_with[GENE]')
                     else:
-                        left_phrase = sent.words[minindex-2].lemma+"-"+sent.words[minindex-1].lemma
-                    
-                    if sent.words[minindex - 2].lemma not in bad_char and sent.words[minindex - 1].lemma not in bad_char and "," not in left_phrase:
-                        features.append('WINDOW_LEFT_M1_PHRASE_with[%s]' % left_phrase)
-                        
-                    elif sent.words[minindex - 2].lemma not in bad_char and "," not in sent.words[minindex - 2].lemma:
-                        if sent.words[minindex-2].word in dict_gene_pruned:
-                            features.append('WINDOW_LEFT_M1_2_with[GENE]')
-                        else:
-                            features.append('WINDOW_LEFT_M1_2_with[%s]' % sent.words[minindex-2].lemma)
+                        features.append('WINDOW_LEFT_M1_2_with[%s]' % sent.words[minindex-2].lemma)
 
-                if maxindex < len(sent.words) - 1:
-                    if sent.words[maxindex + 1].lemma not in bad_char and "," not in sent.words[maxindex + 1].lemma:
-                        if sent.words[maxindex+1].word in dict_gene_pruned:
-                            features.append('WINDOW_RIGHT_M2_1_with[GENE]')
-                        else:
-                            if sent.words[maxindex+1].lemma in ["family", "superfamily"]: flag_family = 1
-                            features.append('WINDOW_RIGHT_M2_1_with[%s]' % sent.words[maxindex+1].lemma)
+            if maxindex < len(sent.words) - 1:
+                if sent.words[maxindex + 1].lemma not in bad_char and "," not in sent.words[maxindex + 1].lemma:
+                    if sent.words[maxindex+1].word in dict_gene_pruned:
+                        features.append('WINDOW_RIGHT_M2_1_with[GENE]')
+                    else:
+                        if sent.words[maxindex+1].lemma in ["family", "superfamily"]: flag_family = 1
+                        features.append('WINDOW_RIGHT_M2_1_with[%s]' % sent.words[maxindex+1].lemma)
 
-                if maxindex < len(sent.words) - 2:
+            if maxindex < len(sent.words) - 2:
+                
+                if sent.words[maxindex + 2].word in dict_gene_pruned:
+                    right_phrase = "GENE"+"-"+sent.words[maxindex+1].lemma
+                else:
+                    right_phrase = sent.words[maxindex+2].lemma+"-"+sent.words[maxindex+1].lemma
+                
+                if sent.words[maxindex + 2].lemma not in bad_char and sent.words[maxindex + 1].lemma not in bad_char and "," not in right_phrase:
+                    features.append('WINDOW_RIGHT_M2_PHRASE_with[%s]' % right_phrase)
                     
+                elif sent.words[maxindex + 2].lemma not in bad_char and "," not in sent.words[maxindex + 2].lemma:
                     if sent.words[maxindex + 2].word in dict_gene_pruned:
-                        right_phrase = "GENE"+"-"+sent.words[maxindex+1].lemma
+                        features.append('WINDOW_RIGHT_M2_2_with[GENE]')
                     else:
-                        right_phrase = sent.words[maxindex+2].lemma+"-"+sent.words[maxindex+1].lemma
+                        features.append('WINDOW_RIGHT_M2_2_with[%s]' % sent.words[maxindex+2].lemma)
+
+            if len(ws) > 4:
+                if sent.words[minindex + 1].lemma not in bad_char and "," not in sent.words[minindex + 1].lemma:
+                    if sent.words[minindex + 1].word in dict_gene_pruned:
+                        features.append('WINDOW_RIGHT_M1_1_with[GENE]')
+                    else:
+                        if sent.words[minindex+1].lemma in ["family", "superfamily"]: flag_family = 1
+                        features.append('WINDOW_RIGHT_M1_1_with[%s]' % sent.words[minindex+1].lemma)
+
+                if sent.words[minindex+2].word in dict_gene_pruned:
+                    m1_right_phrase = "GENE"+"-"+sent.words[minindex+1].lemma
+                else:
+                    m1_right_phrase = sent.words[minindex+2].lemma+"-"+sent.words[minindex+1].lemma
+    
+                if sent.words[minindex + 2].lemma not in bad_char and sent.words[minindex + 1].lemma not in bad_char and "," not in m1_right_phrase:
+                    features.append('WINDOW_RIGHT_M1_PHRASE_with[%s]' % m1_right_phrase)
                     
-                    if sent.words[maxindex + 2].lemma not in bad_char and sent.words[maxindex + 1].lemma not in bad_char and "," not in right_phrase:
-                        features.append('WINDOW_RIGHT_M2_PHRASE_with[%s]' % right_phrase)
-                        
-                    elif sent.words[maxindex + 2].lemma not in bad_char and "," not in sent.words[maxindex + 2].lemma:
-                        if sent.words[maxindex + 2].word in dict_gene_pruned:
-                            features.append('WINDOW_RIGHT_M2_2_with[GENE]')
-                        else:
-                            features.append('WINDOW_RIGHT_M2_2_with[%s]' % sent.words[maxindex+2].lemma)
-
-                if len(ws) > 4:
-                    if sent.words[minindex + 1].lemma not in bad_char and "," not in sent.words[minindex + 1].lemma:
-                        if sent.words[minindex + 1].word in dict_gene_pruned:
-                            features.append('WINDOW_RIGHT_M1_1_with[GENE]')
-                        else:
-                            if sent.words[minindex+1].lemma in ["family", "superfamily"]: flag_family = 1
-                            features.append('WINDOW_RIGHT_M1_1_with[%s]' % sent.words[minindex+1].lemma)
-
+                elif sent.words[minindex + 2].lemma not in bad_char and "," not in sent.words[minindex + 2].lemma:
                     if sent.words[minindex+2].word in dict_gene_pruned:
-                        m1_right_phrase = "GENE"+"-"+sent.words[minindex+1].lemma
+                        features.append('WINDOW_RIGHT_M1_2_with[GENE]')
                     else:
-                        m1_right_phrase = sent.words[minindex+2].lemma+"-"+sent.words[minindex+1].lemma
-        
-                    if sent.words[minindex + 2].lemma not in bad_char and sent.words[minindex + 1].lemma not in bad_char and "," not in m1_right_phrase:
-                        features.append('WINDOW_RIGHT_M1_PHRASE_with[%s]' % m1_right_phrase)
-                        
-                    elif sent.words[minindex + 2].lemma not in bad_char and "," not in sent.words[minindex + 2].lemma:
-                        if sent.words[minindex+2].word in dict_gene_pruned:
-                            features.append('WINDOW_RIGHT_M1_2_with[GENE]')
-                        else:
-                            features.append('WINDOW_RIGHT_M1_2_with[%s]' % sent.words[minindex+2].lemma)
+                        features.append('WINDOW_RIGHT_M1_2_with[%s]' % sent.words[minindex+2].lemma)
 
-                    if sent.words[maxindex - 1].lemma not in bad_char and "," not in sent.words[maxindex - 1].lemma:
-                        if sent.words[maxindex - 1].word in dict_gene_pruned:
-                            features.append('WINDOW_LEFT_M2_1_with[GENE]')
-                        else:
-                            features.append('WINDOW_LEFT_M2_1_with[%s]' % sent.words[maxindex-1].lemma)
-
-                    if sent.words[maxindex-2].word in dict_gene_pruned:
-                        m2_left_phrase = "GENE"+"-"+sent.words[maxindex-1].lemma
+                if sent.words[maxindex - 1].lemma not in bad_char and "," not in sent.words[maxindex - 1].lemma:
+                    if sent.words[maxindex - 1].word in dict_gene_pruned:
+                        features.append('WINDOW_LEFT_M2_1_with[GENE]')
                     else:
-                        m2_left_phrase = sent.words[maxindex-2].lemma+"-"+sent.words[maxindex-1].lemma
+                        features.append('WINDOW_LEFT_M2_1_with[%s]' % sent.words[maxindex-1].lemma)
 
-                    if sent.words[maxindex - 2].lemma not in bad_char and sent.words[maxindex - 1].lemma not in bad_char and "," not in m2_left_phrase: 
-                        features.append('WINDOW_LEFT_M2_PHRASE_with[%s]' % m2_left_phrase)
-                        
-                    elif sent.words[maxindex - 2].lemma not in bad_char and "," not in sent.words[maxindex - 2].lemma:
-                        if sent.words[maxindex-2].word in dict_gene_pruned:
-                            features.append('WINDOW_LEFT_M2_2_with[GENE]')
-                        else:
-                            features.append('WINDOW_LEFT_M2_2_with[%s]' % sent.words[maxindex-2].lemma)
+                if sent.words[maxindex-2].word in dict_gene_pruned:
+                    m2_left_phrase = "GENE"+"-"+sent.words[maxindex-1].lemma
+                else:
+                    m2_left_phrase = sent.words[maxindex-2].lemma+"-"+sent.words[maxindex-1].lemma
 
-                ##### FEATURE: DOMAIN #####
-                domain_words = ["domains", "motif", "motifs", "domain", "site", "sites", "region", "regions", "sequence", "sequences", "elements"]
-                found_domain = 0
-                if minindex > 0:
-                    if sent.words[minindex + 1].word in domain_words: 
-                        found_domain = 1
-                        features.append('GENE_FOLLOWED_BY_DOMAIN_WORD')
-                
-                if maxindex < len(sent.words) - 1 and found_domain == 0:
-                    if sent.words[maxindex + 1].word in domain_words: 
-                        features.append('GENE_FOLLOWED_BY_DOMAIN_WORD')
-                        found_domain = 1
-
-                
-                ##### FEATURE: PLURAL GENES #####
-                found_plural = 0
-                if minindex > 0:
-                    if sent.words[minindex + 1].pos == "NNS" or sent.words[minindex + 1].pos == "NNPS": 
-                        found_plural = 1
-                        features.append('GENE_M1_FOLLOWED_BY_PLURAL_NOUN_with[%s]' % sent.words[minindex + 1].word)
-                
-                if maxindex < len(sent.words) - 1 and found_plural == 0:
-                    if sent.words[maxindex + 1].pos == "NNS" or sent.words[maxindex + 1].pos == "NNPS": 
-                        found_plural = 1
-                        features.append('GENE_M2_FOLLOWED_BY_PLURAL_NOUN)_with[%s]' % sent.words[maxindex + 1].word)
-
-                ##### FEATURE: GENE LISTING #####
-                if len(ws) > 0:
-                    count = 0
-                    flag_not_list = 0
-                    for w in ws:
-
-                        #should be comma
-                        if count % 4 == 0:
-                            if w != '_':
-                                flag_not_list = 1
-                        elif count % 4 == 1:
-                            if w != ",":
-                                flag_not_list = 1
-                        elif count %4 == 2:
-                            if w != "_":
-                                flag_not_list = 1
-                        #should be a gene
-                        else:
-                            if w not in dict_gene_symbols_all:
-                                flag_not_list = 1
-                        count = count + 1
-
-                    if ws[-1] != '_':
-                        flag_not_list = 1
-
-                    if flag_not_list == 0:
-                        features.append('GENE_LISTING')
-
-                if len(ws) > 0:
-                    count = 0
-                    flag_not_list = 0
-                    for w in ws:
-
-                        #should be comma
-                        if count % 2 == 0:
-                            if w != ',':
-                                flag_not_list = 1
-
-                        #should be a gene
-                        else:
-                            if w not in dict_gene_symbols_all:
-                                flag_not_list = 1
-                        count = count + 1
-
-                    if ws[-1] != ',':
-                        flag_not_list = 1
-
-                    if flag_not_list == 0:
-                        features.append('GENE_LISTING')
-
-                #### GENERATE FEATURE ARRAY FOR POSTGRESQL #####
-                feature = "{" + ','.join(features) + '}'
-
-                mid1 = doc.docid + '_' + '%d' % sent.sentid + '_' + '%d' % w1.insent_id
-                mid2 = doc.docid + '_' + '%d' % sent.sentid + '_' + '%d' % w2.insent_id
-
-                ############## DISTANT SUPERVISION ###################
-                
-                sent_text = sent.__repr__()
-                if sent_text.endswith("\\"):
-                    sent_text = sent_text[0:len(sent_text) - 1]
-                
-                if w1.word in dict_exclude_dist_sup and w2.word in dict_exclude_dist_sup[w1.word]:
-                    print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-
-                elif sent.words[0].word == "Abbreviations" and sent.words[1].word == "used":
-                    if doc.docid.split(".pdf")[0] not in dict_gs_docids:
-                        print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
-                        print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                    else:
-                        print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-
-                elif w1.word not in dict_abbv and w1.word not in dict_english and w2.word not in dict_english and w2.word not in dict_abbv and w1.word not in dict_domains and w2.word not in dict_domains:
-                    if w1.word in dict_interact and w2.word in dict_interact[w1.word] and "mutation" not in sent_text and "mutations" not in sent_text and "variant" not in sent_text and "variants" not in sent_text and "polymorphism" not in sent_text and "polymorphisms" not in sent_text:
-
-                        if found_domain == 0 and flag_family == 0:
-                            if doc.docid.split(".pdf")[0] not in dict_gs_docids:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "true", feature, sent_text, "\\N"])
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                            else:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-
-                        else:
-                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                if sent.words[maxindex - 2].lemma not in bad_char and sent.words[maxindex - 1].lemma not in bad_char and "," not in m2_left_phrase: 
+                    features.append('WINDOW_LEFT_M2_PHRASE_with[%s]' % m2_left_phrase)
                     
+                elif sent.words[maxindex - 2].lemma not in bad_char and "," not in sent.words[maxindex - 2].lemma:
+                    if sent.words[maxindex-2].word in dict_gene_pruned:
+                        features.append('WINDOW_LEFT_M2_2_with[GENE]')
                     else:
-                        # Negative Example: Mention appear in KB in same doc, but no interaction extracted in KB
-                        appear_in_same_doc = False
-                        if re.search('^[A-Z]', w1.word) and re.search('^[A-Z]', w2.word):
-                            if w1.word in dict_gene_pmid:
-                                for pmid in dict_gene_pmid[w1.word]:
-                                    if w2.word in dict_pmid_gene[pmid]:
-                                        appear_in_same_doc = True
+                        features.append('WINDOW_LEFT_M2_2_with[%s]' % sent.words[maxindex-2].lemma)
 
-                        #check if not interact/bind phrase is in ws and not just the words
-                        no_interact_phrase = False
-                        for j, var in enumerate(ws):
-                            if var == 'not' and j + 1 < len(ws) - 1:
-                                if ws[j+1] == "interacts" or ws[j+1] == "interact" or ws[j+1] == "bind":
-                                    no_interact_phrase = True
+            ##### FEATURE: DOMAIN #####
+            domain_words = ["domains", "motif", "motifs", "domain", "site", "sites", "region", "regions", "sequence", "sequences", "elements"]
+            found_domain = 0
+            if minindex > 0:
+                if sent.words[minindex + 1].word in domain_words:
+                    found_domain = 1
+                    features.append('GENE_FOLLOWED_BY_DOMAIN_WORD')
 
-                        if w1.word in dict_no_interact and ("binds" not in ws and "interacts" not in ws and "interacted" not in ws and "bound" not in ws and "complex" not in ws and "associates" not in ws and "associated" not in ws and "bind" not in ws and "interact" not in ws):
-                            if w2.word in dict_no_interact[w1.word] and high_quality_verb == 0: 
-                                if doc.docid.split(".pdf")[0] not in dict_gs_docids:
-                                    print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
-                                    print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                                else:
-                                    print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                            else:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                        elif w2.word in dict_no_interact and ("binds" not in ws and "interacts" not in ws and "interacted" not in ws and "bound" not in ws and "complex" not in ws and "associates" not in ws and "associated" not in ws and "bind" not in ws and "interact" not in ws):
-                            if w1.word in dict_no_interact[w2.word] and high_quality_verb == 0:
-                                if doc.docid.split(".pdf")[0] not in dict_gs_docids:
-                                    print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
-                                    print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                                else:
-                                    print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                            else:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                        elif appear_in_same_doc == True and ("binds" not in ws and "interacts" not in ws and "interacted" not in ws and "bound" not in ws and "complex" not in ws and "associates" not in ws and "associated" not in ws and "bind" not in ws and "interact" not in ws ) and high_quality_verb == 0:
-                            if doc.docid.split(".pdf")[0] not in dict_gs_docids:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                            else:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                        elif no_interact_phrase == True and high_quality_verb == 0: #("binds" in ws or "interacts" in ws or "bind" in ws or "interact" in ws) and "not" in ws:
-                            if doc.docid.split(".pdf")[0] not in dict_gs_docids:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                            else:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                        elif w1.ner == "Person" or w2.ner == "Person":
-                            if doc.docid.split(".pdf")[0] not in dict_gs_docids:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])    
-                            else:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                        elif random.random() < .08 and high_quality_verb == 0:
-                            if doc.docid.split(".pdf")[0] not in dict_gs_docids:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])                        
-                            else:
-                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
-                        else:
-                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+
+            if maxindex < len(sent.words) - 1 and found_domain == 0:
+                if sent.words[maxindex + 1].word in domain_words:
+                    features.append('GENE_FOLLOWED_BY_DOMAIN_WORD')
+                    found_domain = 1
+
+
+            ##### FEATURE: PLURAL GENES #####
+            found_plural = 0
+            if minindex > 0:
+                if sent.words[minindex + 1].pos == "NNS" or sent.words[minindex + 1].pos == "NNPS": 
+                    found_plural = 1
+                    features.append('GENE_M1_FOLLOWED_BY_PLURAL_NOUN_with[%s]' % sent.words[minindex + 1].word)
+
+
+            if maxindex < len(sent.words) - 1 and found_plural == 0:
+                if sent.words[maxindex + 1].pos == "NNS" or sent.words[maxindex + 1].pos == "NNPS": 
+                    found_plural = 1
+                    features.append('GENE_M2_FOLLOWED_BY_PLURAL_NOUN)_with[%s]' % sent.words[maxindex + 1].word)
+
+
+            ##### FEATURE: GENE LISTING #####
+            if len(ws) > 0:
+                count = 0
+                flag_not_list = 0
+                for w in ws:
+
+                    #should be comma
+                    if count % 4 == 0:
+                        if w != '_':
+                            flag_not_list = 1
+                    elif count % 4 == 1:
+                        if w != ",":
+                            flag_not_list = 1
+                    elif count %4 == 2:
+                        if w != "_":
+                            flag_not_list = 1
+                    #should be a gene
+                    else:
+                        if w not in dict_gene_symbols_all:
+                            flag_not_list = 1
+                    count = count + 1
+
+                if ws[-1] != '_':
+                    flag_not_list = 1
+
+                if flag_not_list == 0:
+                    features.append('GENE_LISTING')
+
+            if len(ws) > 0:
+                count = 0
+                flag_not_list = 0
+                for w in ws:
+
+                    #should be comma
+                    if count % 2 == 0:
+                        if w != ',':
+                            flag_not_list = 1
+
+                    #should be a gene
+                    else:
+                        if w not in dict_gene_symbols_all:
+                            flag_not_list = 1
+                    count = count + 1
+
+                if ws[-1] != ',':
+                    flag_not_list = 1
+
+                if flag_not_list == 0:
+                    features.append('GENE_LISTING')
+
+            #### GENERATE FEATURE ARRAY FOR POSTGRESQL #####
+            feature = "{" + ','.join(features) + '}'
+
+            mid1 = doc.docid + '_' + '%d' % sent.sentid + '_' + '%d' % w1.insent_id
+            mid2 = doc.docid + '_' + '%d' % sent.sentid + '_' + '%d' % w2.insent_id
+
+            ############## DISTANT SUPERVISION ###################
+
+            sent_text = sent.__repr__()
+            if sent_text.endswith("\\"):
+                sent_text = sent_text[0:len(sent_text) - 1]
+
+
+            if w1.word in dict_exclude_dist_sup and w2.word in dict_exclude_dist_sup[w1.word]:
+                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+
+            elif sent.words[0].word == "Abbreviations" and sent.words[1].word == "used":
+                if doc.docid.split(".pdf")[0] not in dict_gs_docids:
+                    print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
+                    print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
                 else:
                     print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+
+            elif w1.word not in dict_abbv and w1.word not in dict_english and w2.word not in dict_english and w2.word not in dict_abbv and w1.word not in dict_domains and w2.word not in dict_domains:
+                if w1.word in dict_interact and w2.word in dict_interact[w1.word] and "mutation" not in sent_text and "mutations" not in sent_text and "variant" not in sent_text and "variants" not in sent_text and "polymorphism" not in sent_text and "polymorphisms" not in sent_text:
+
+                    if found_domain == 0 and flag_family == 0:
+                        if doc.docid.split(".pdf")[0] not in dict_gs_docids:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "true", feature, sent_text, "\\N"])
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                        else:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+
+                    else:
+                        print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                
+                else:
+                    # Negative Example: Mention appear in KB in same doc, but no interaction extracted in KB
+                    appear_in_same_doc = False
+                    if re.search('^[A-Z]', w1.word) and re.search('^[A-Z]', w2.word):
+                        if w1.word in dict_gene_pmid:
+                            for pmid in dict_gene_pmid[w1.word]:
+                                if w2.word in dict_pmid_gene[pmid]:
+                                    appear_in_same_doc = True
+
+                    #check if not interact/bind phrase is in ws and not just the words
+                    no_interact_phrase = False
+                    for j, var in enumerate(ws):
+                        if var == 'not' and j + 1 < len(ws) - 1:
+                            if ws[j+1] == "interacts" or ws[j+1] == "interact" or ws[j+1] == "bind":
+                                no_interact_phrase = True
+
+                    if w1.word in dict_no_interact and ("binds" not in ws and "interacts" not in ws and "interacted" not in ws and "bound" not in ws and "complex" not in ws and "associates" not in ws and "associated" not in ws and "bind" not in ws and "interact" not in ws):
+                        if w2.word in dict_no_interact[w1.word] and high_quality_verb == 0: 
+                            if doc.docid.split(".pdf")[0] not in dict_gs_docids:
+                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
+                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                            else:
+                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                        else:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                    elif w2.word in dict_no_interact and ("binds" not in ws and "interacts" not in ws and "interacted" not in ws and "bound" not in ws and "complex" not in ws and "associates" not in ws and "associated" not in ws and "bind" not in ws and "interact" not in ws):
+                        if w1.word in dict_no_interact[w2.word] and high_quality_verb == 0:
+                            if doc.docid.split(".pdf")[0] not in dict_gs_docids:
+                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
+                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                            else:
+                                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                        else:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                    elif appear_in_same_doc == True and ("binds" not in ws and "interacts" not in ws and "interacted" not in ws and "bound" not in ws and "complex" not in ws and "associates" not in ws and "associated" not in ws and "bind" not in ws and "interact" not in ws ) and high_quality_verb == 0:
+                        if doc.docid.split(".pdf")[0] not in dict_gs_docids:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                        else:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                    elif no_interact_phrase == True and high_quality_verb == 0: #("binds" in ws or "interacts" in ws or "bind" in ws or "interact" in ws) and "not" in ws:
+                        if doc.docid.split(".pdf")[0] not in dict_gs_docids:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                        else:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                    elif w1.ner == "Person" or w2.ner == "Person":
+                        if doc.docid.split(".pdf")[0] not in dict_gs_docids:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                        else:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                    elif random.random() < .08 and high_quality_verb == 0:
+                        if doc.docid.split(".pdf")[0] not in dict_gs_docids:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "false", feature, sent_text, "\\N"])
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                        else:
+                            print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+                    else:
+                        print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
+            else:
+                print '\t'.join([doc.docid, mid1, mid2, w1.word, w2.word, "\\N", feature, sent_text, "\\N"])
 
 
 if __name__ == '__main__':
