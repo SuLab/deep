@@ -7,6 +7,9 @@ Contact: emily.mallory@stanford.edu
 
 Extractor for gene-gene relations, compiled
 in a single script
+
+Refactored by Tong Shu Li
+Last updated: 2016-02-23
 """
 from itertools import combinations
 
@@ -47,46 +50,45 @@ def dep_path(deptree, sent, lemma, start1, end1, start2, end2):
     Simplified version of Sentence class dependency path code
     """
 
-    if len(deptree) > 0:
-        path1 = []
-        end = end1 - 1
-        ct = 0
-        while True:
-            ct = ct + 1
-            if ct > 100:
-                break
-            if end not in deptree:
-                path1.append({"current":end, "parent": -1, "label":"ROOT"})
-                break
-            path1.append({"current":end, "parent": deptree[end]["parent"], "label":deptree[end]["label"]})
-            end = deptree[end]["parent"]
+    def get_path(node):
+        """Given a starting node, walk the dependency tree and return the path walked."""
+        MAX_STEPS = 100
+        path = []
 
-        path2 = []
-        end = end2 - 1
-        ct = 0
-        while True:
-            ct = ct + 1
-            if ct > 100:
-                break
-            if end not in deptree:
-                path2.append({"current":end, "parent": -1, "label":"ROOT"})
-                break
-            path2.append({"current":end, "parent": deptree[end]["parent"], "label":deptree[end]["label"]})
-            end = deptree[end]["parent"]
+        steps = 100
+        while steps < MAX_STEPS and node in deptree:
+            path.append({
+                "current": node,
+                "parent": deptree[node]["parent"],
+                "label": deptree[node]["label"]
+            })
+
+            node = deptree[node]["parent"]
+            steps += 1
+
+        path.append({
+            "current": node,
+            "parent": -1,
+            "label": "ROOT"
+        })
+
+        return path
+
+
+    if len(deptree) > 0:
+        path1 = get_path(end1-1)
+        path2 = get_path(end2-1)
+
 
         commonroot = None
         for i in range(0, len(path1)):
             j = len(path1) - 1 - i
-            #plpy.notice(path1[j])  
-            #plpy.notice(path2[-i-1])  
             if -i-1 <= -len(path2) or path1[j]["current"] != path2[-i-1]["current"]:
                 break
             commonroot = path1[j]["current"]
 
         left_path = ""
-        lct = 0
         for i in range(0, len(path1)):
-            lct = lct + 1
             if path1[i]["current"] == commonroot:
                 break
             if path1[i]["parent"] == commonroot or path1[i]["parent"]==-1:
@@ -98,9 +100,7 @@ def dep_path(deptree, sent, lemma, start1, end1, start2, end2):
                 left_path = left_path + ("--" + path1[i]["label"] + "->" + w)
 
         right_path = ""
-        rct = 0
         for i in range(0, len(path2)):
-            rct = rct + 1
             if path2[i]["current"] == commonroot:
                 break
             if path2[i]["parent"] == commonroot or path2[i]["parent"]==-1:
