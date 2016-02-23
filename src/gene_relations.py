@@ -42,17 +42,12 @@ dict_gs_docids = set()
 
 
 def dep_path(deptree, sent, lemma, start1, start2):
-    # start = end + 1
-    # end - 1 = start
-
     """
-    Name: dep_path
-    Input: dependency tree, sentence, lemma, and start and end word postions
+    Input: dependency tree, sentence, lemma, and start word postions
     Return: Dependency path between two words
 
     Simplified version of Sentence class dependency path code
     """
-
     def get_path(node):
         """Given a starting node, walk the dependency tree and return the path walked."""
         MAX_STEPS = 100
@@ -77,41 +72,47 @@ def dep_path(deptree, sent, lemma, start1, start2):
 
         return path
 
+    def find_common_root(pathA, pathB):
+        pos = 1
+        while (pos <= len(pathA) and pos <= len(pathB)
+            and pathA[-pos]["current"] == pathB[-pos]["current"]):
+            pos += 1
+
+        return pathA[-pos+1]["current"] if pos > 1 else None
+
 
     if len(deptree) > 0:
         path1 = get_path(start1)
         path2 = get_path(start2)
 
-
-        commonroot = None
-        for i in range(0, len(path1)):
-            j = len(path1) - 1 - i
-            if -i-1 <= -len(path2) or path1[j]["current"] != path2[-i-1]["current"]:
-                break
-            commonroot = path1[j]["current"]
+        commonroot = find_common_root(path1, path2)
 
         left_path = ""
         for i in range(0, len(path1)):
             if path1[i]["current"] == commonroot:
                 break
+
             if path1[i]["parent"] == commonroot or path1[i]["parent"]==-1:
                 left_path = left_path + ("--" + path1[i]["label"] + "->" + '|')
             else:
                 w = lemma[path1[i]["parent"]].lower()
-                if i == 0: 
+                if i == 0:
                     w = ""
+
                 left_path = left_path + ("--" + path1[i]["label"] + "->" + w)
 
         right_path = ""
         for i in range(0, len(path2)):
             if path2[i]["current"] == commonroot:
                 break
+
             if path2[i]["parent"] == commonroot or path2[i]["parent"]==-1:
                 right_path = ('|' + "<-" + path2[i]["label"] + "--") + right_path
             else:
                 w = lemma[path2[i]["parent"]].lower()
                 if i == 0:
                     w = ""
+
                 right_path = (w + "<-" + path2[i]["label"] + "--" ) + right_path
 
         path = ""
