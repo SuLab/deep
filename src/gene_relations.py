@@ -115,18 +115,14 @@ def dep_path(deptree, sent, lemma, start1, start2):
 
                 right_path = (w + "<-" + path2[i]["label"] + "--" ) + right_path
 
-        path = ""
+
+        if commonroot is None:
+            return left_path + "NONEROOT" + right_path
+
         if commonroot == start1 or commonroot == start2:
-            path = left_path + "SAMEPATH" + right_path
-        else:
-            if commonroot != None:
-                path = left_path + lemma[commonroot].lower() + right_path
-            else:
-                path = left_path + "NONEROOT" + right_path
-        if path != "":
-            return path
-        else:
-            return None
+            return left_path + "SAMEPATH" + right_path
+
+        return left_path + lemma[commonroot].lower() + right_path
 
 
 def load_dict():
